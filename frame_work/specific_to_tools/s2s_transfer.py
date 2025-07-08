@@ -39,7 +39,9 @@ def S2S_transfer(config: dict) -> bool:
     ssh_conn_id = config["ssh_conn_id"]
     remote_script_path = config["remote_script_path"]
     python_path = config["python_path"]
-
+    temp_dir = config["temp_dir"]
+    max_chunk_size_mb = config["max_chunk_size_mb"]
+    
     # farm_list: List[str],
     # farm_path_template: str,
     # s3_prefix_list: List[str],
@@ -57,6 +59,18 @@ def S2S_transfer(config: dict) -> bool:
     try:
         # Generate ETL script
         logger.info("Generating ETL script...")
+        # farm_list: List[str],
+        # farm_path_template: str,
+        # s3_prefix_list: List[str],
+        # aws_access_key: str,
+        # aws_secret_key: str,
+        # s3_bucket: str,
+        # index_id: str,
+        # s3_date: str,
+        # s3_time: str,
+        # temp_dir: str,  # New parameter
+        # max_chunk_size_mb: int = 200  # New parameter
+
         script_content = generate_etl_script(
             farm_list=farm_list,
             farm_path_template=farm_path_template,
@@ -65,9 +79,12 @@ def S2S_transfer(config: dict) -> bool:
             aws_secret_key=aws_secret_key,
             s3_bucket=s3_bucket,
             index_id=index_id,
-            timezone=timezone
+            timezone=timezone,
+            temp_dir = temp_dir,
+            max_chunk_size_mb = max_chunk_size_mb
+
         )
-        
+                
         logger.info("ETL script generated successfully")
         
         # Execute on remote server
@@ -109,7 +126,9 @@ def generate_etl_script(
     aws_secret_key,
     s3_bucket,
     index_id,
-    timezone
+    timezone,
+    temp_dir,
+    max_chunk_size_mb
 ):
     # Use raw string to avoid escaping issues
     static_script_part = r'''
@@ -331,10 +350,12 @@ def source_to_stage_transfer(
     s3_bucket: str,
     index_id: str,
     s3_date: str,
-    s3_time: str
+    s3_time: str,
+    temp_dir: str, 
+    max_chunk_size_mb: int = 200  
 ) -> bool:
     """
-    Transfer fairshare data from multiple farms to S3 in a single NDJSON file.
+    Transfer fairshare data from multiple farms to S3 using chunked files.
     
     Args:
         farm_list: List of farm names to process
@@ -346,6 +367,8 @@ def source_to_stage_transfer(
         index_id: Index ID for filename
         s3_date: Date string for S3 path
         s3_time: Time string for S3 path
+        temp_dir: Directory for temporary files
+        max_chunk_size_mb: Maximum chunk size in MB
     
     Returns:
         True if successful, False if no farms processed
@@ -354,11 +377,20 @@ def source_to_stage_transfer(
     s3_prefix = '/'.join(s3_prefix_list)
     epoch_time = int(time.time())
     ts_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_time))
-    filename = "%s_%d.json" % (index_id, epoch_time)
-    s3_key = "%s/%s/%s/%s" % (s3_prefix, s3_date, s3_time, filename)
+    base_filename = "%s_%d" % (index_id, epoch_time)
+    s3_key_prefix = "%s/%s/%s" % (s3_prefix, s3_date, s3_time)
     
     logger.info("Starting transfer process for %d farms", len(farm_list))
-    logger.info("Target S3 location: s3://%s/%s", s3_bucket, s3_key)
+    logger.info("Target S3 location: s3://%s/%s/", s3_bucket, s3_key_prefix)
+    logger.info("Temp directory: %s", temp_dir)
+    logger.info("Max chunk size: %d MB", max_chunk_size_mb)
+    
+    # Ensure temp directory exists
+    try:
+        os.makedirs(temp_dir, exist_ok=True)
+    except Exception as e:
+        logger.error("Failed to create temp directory %s: %s", temp_dir, str(e))
+        return False
     
     # Initialize S3 client
     try:
@@ -370,70 +402,162 @@ def source_to_stage_transfer(
     except Exception as e:
         raise RuntimeError("Failed to initialize S3 client: %s" % str(e))
     
-    # Process all farms into a single list
-    all_records = []
+    # Initialize chunking variables
+    max_chunk_size_bytes = max_chunk_size_mb * 1024 * 1024
+    chunk_num = 0
+    current_chunk_size = 0
+    current_file = None
+    current_temp_path = None
+    temp_files = []
     farms_processed = 0
+    total_records = 0
     
-    for farm_name in farm_list:
-        logger.info("Processing farm: %s", farm_name)
-        
-        # Build file path
-        file_path = farm_path_template.replace('{farm}', farm_name)
-        
-        # Check if file exists
-        if not os.path.exists(file_path):
-            logger.warning("Farm '%s' skipped: file not found at %s", farm_name, file_path)
-            continue
-            
-        # Read file
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-        except Exception as e:
-            logger.error("Farm '%s' skipped: failed to read file %s: %s", farm_name, file_path, str(e))
-            continue
-        
-        # Extract valid UserGroup block
-        block_lines, block_start_line = extract_valid_usergroup_block(lines)
-        
-        if not block_lines:
-            logger.warning("Farm '%s' skipped: no valid UserGroup block found in %s", farm_name, file_path)
-            continue
-        
-        # Parse the block into records
-        parsed_records = parse_usergroup_block(block_lines, farm_name, ts_str)
-        
-        if not parsed_records:
-            logger.warning("Farm '%s' skipped: no parseable user records found in %s", farm_name, file_path)
-            continue
-        
-        # Add to combined list
-        logger.info("Farm '%s' contributed %d user records", farm_name, len(parsed_records))
-        all_records.extend(parsed_records)
-        farms_processed += 1
-    
-    # Check if any farms were processed
-    if farms_processed == 0:
-        logger.warning("No farm files processed successfully. Nothing to upload.")
-        return False
-    
-    # Convert all records to NDJSON format
-    ndjson_data = '\n'.join(json.dumps(record, separators=(',', ':')) for record in all_records)
-    
-    # Upload single file to S3
     try:
-        s3_client.put_object(
-            Bucket=s3_bucket,
-            Key=s3_key,
-            Body=ndjson_data.encode('utf-8'),
-            ContentType="application/json"
-        )
-        logger.info("Successfully uploaded %d total records from %d farms", len(all_records), farms_processed)
-        logger.info("S3 upload completed: s3://%s/%s", s3_bucket, s3_key)
+        # Process farms and write directly to chunked files
+        for farm_name in farm_list:
+            logger.info("Processing farm: %s", farm_name)
+            
+            # Build file path
+            file_path = farm_path_template.replace('{farm}', farm_name)
+            
+            # Check if file exists
+            if not os.path.exists(file_path):
+                logger.warning("Farm '%s' skipped: file not found at %s", farm_name, file_path)
+                continue
+                
+            # Read file
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+            except Exception as e:
+                logger.error("Farm '%s' skipped: failed to read file %s: %s", farm_name, file_path, str(e))
+                continue
+            
+            # Extract valid UserGroup block
+            block_lines, block_start_line = extract_valid_usergroup_block(lines)
+            
+            if not block_lines:
+                logger.warning("Farm '%s' skipped: no valid UserGroup block found in %s", farm_name, file_path)
+                continue
+            
+            # Parse the block into records
+            parsed_records = parse_usergroup_block(block_lines, farm_name, ts_str)
+            
+            if not parsed_records:
+                logger.warning("Farm '%s' skipped: no parseable user records found in %s", farm_name, file_path)
+                continue
+            
+            logger.info("Farm '%s' contributed %d user records", farm_name, len(parsed_records))
+            farms_processed += 1
+            
+            # Write records to chunked files
+            for record in parsed_records:
+                # Serialize record
+                json_line = json.dumps(record, separators=(',', ':')) + '\n'
+                json_line_bytes = json_line.encode('utf-8')
+                line_size = len(json_line_bytes)
+                
+                # Check if single record is too large
+                if line_size > max_chunk_size_bytes:
+                    logger.error("Single record too large (%d bytes > %d bytes limit)", 
+                               line_size, max_chunk_size_bytes)
+                    return False
+                
+                # Check if we need a new chunk
+                if (current_file is None or 
+                    current_chunk_size + line_size > max_chunk_size_bytes):
+                    
+                    # Close current file if exists
+                    if current_file is not None:
+                        current_file.close()
+                        logger.info("Completed chunk %d: %s (%d bytes)", 
+                                  chunk_num, current_temp_path, current_chunk_size)
+                    
+                    # Create new chunk file
+                    chunk_num += 1
+                    if chunk_num == 1:
+                        temp_filename = "%s.json" % base_filename
+                    else:
+                        temp_filename = "%s_part%d.json" % (base_filename, chunk_num)
+                    
+                    current_temp_path = os.path.join(temp_dir, temp_filename)
+                    temp_files.append(current_temp_path)
+                    
+                    try:
+                        current_file = open(current_temp_path, 'w', encoding='utf-8')
+                    except Exception as e:
+                        logger.error("Failed to create temp file %s: %s", current_temp_path, str(e))
+                        return False
+                    
+                    current_chunk_size = 0
+                    logger.info("Started chunk %d: %s", chunk_num, current_temp_path)
+                
+                # Write record to current file
+                current_file.write(json_line)
+                current_chunk_size += line_size
+                total_records += 1
+                
+                # Progress logging for large datasets
+                if total_records % 10000 == 0:
+                    logger.info("Processed %d total records", total_records)
+        
+        # Close final file
+        if current_file is not None:
+            current_file.close()
+            logger.info("Completed final chunk %d: %s (%d bytes)", 
+                      chunk_num, current_temp_path, current_chunk_size)
+        
+        # Check if any farms were processed
+        if farms_processed == 0:
+            logger.warning("No farm files processed successfully. Nothing to upload.")
+            return False
+        
+        # Upload all chunks to S3
+        for i, temp_path in enumerate(temp_files, 1):
+            try:
+                # Generate S3 key
+                temp_filename = os.path.basename(temp_path)
+                s3_key = "%s/%s" % (s3_key_prefix, temp_filename)
+                
+                # Get file size for logging
+                file_size = os.path.getsize(temp_path)
+                
+                # Upload chunk
+                logger.info("Uploading chunk %d/%d: %s (%d bytes)", 
+                          i, len(temp_files), temp_filename, file_size)
+                
+                with open(temp_path, 'rb') as f:
+                    s3_client.put_object(
+                        Bucket=s3_bucket,
+                        Key=s3_key,
+                        Body=f,
+                        ContentType="application/json"
+                    )
+                
+                logger.info("Successfully uploaded: s3://%s/%s", s3_bucket, s3_key)
+                
+            except Exception as e:
+                logger.error("Failed to upload chunk %s: %s", temp_path, str(e))
+                return False
+        
+        logger.info("Successfully uploaded %d chunks with %d total records from %d farms", 
+                   len(temp_files), total_records, farms_processed)
+        
         return True
         
     except Exception as e:
-        raise RuntimeError("Failed to upload to S3: %s" % str(e))
+        logger.error("Error during transfer: %s", str(e))
+        return False
+        
+    finally:
+        # Clean up temporary files
+        for temp_path in temp_files:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    logger.debug("Cleaned up temp file: %s", temp_path)
+            except Exception as e:
+                logger.warning("Failed to clean up temp file %s: %s", temp_path, str(e))
 '''
 
     # Rest of your code remains the same
@@ -442,19 +566,21 @@ from datetime import datetime
 import pytz
 
 if __name__ == "__main__":
-    timezone_str = "{timezone}"
+    timezone_str = {timezone}
     tz = pytz.timezone(timezone_str)
     current_time = datetime.now(tz)
     s3_date = current_time.strftime("%Y-%m-%d")
     s3_time = "00-00" 
 
     farm_list = {farm_list}
-    farm_path_template = "{farm_path_template}"
+    farm_path_template = {farm_path_template}
     s3_prefix_list = {s3_prefix_list}
-    aws_access_key = "{aws_access_key}"
-    aws_secret_key = "{aws_secret_key}"
-    s3_bucket = "{s3_bucket}"
-    index_id = "{index_id}"
+    aws_access_key = {aws_access_key}
+    aws_secret_key = {aws_secret_key}
+    s3_bucket = {s3_bucket}
+    index_id = {index_id}
+    temp_dir = {temp_dir}
+    max_chunk_size_mb = {max_chunk_size_mb}
 
     try:
         result = source_to_stage_transfer(
@@ -466,7 +592,9 @@ if __name__ == "__main__":
             s3_bucket=s3_bucket,
             index_id=index_id,
             s3_date=s3_date,
-            s3_time=s3_time
+            s3_time=s3_time,
+            temp_dir = temp_dir,
+            max_chunk_size_mb = max_chunk_size_mb
         )
         
         if result:
@@ -477,14 +605,16 @@ if __name__ == "__main__":
         logger.error("Transfer failed: {{}}".format(e))
         raise
 '''.format(
-        timezone=timezone,
-        farm_list=repr(farm_list),
-        farm_path_template=farm_path_template,
+        timezone=repr(timezone),
+        farm_list=farm_list,
+        farm_path_template=repr(farm_path_template),
         s3_prefix_list=repr(s3_prefix_list),
-        aws_access_key=aws_access_key,
-        aws_secret_key=aws_secret_key,
-        s3_bucket=s3_bucket,
-        index_id=index_id
+        aws_access_key=repr(aws_access_key),
+        aws_secret_key=repr(aws_secret_key),
+        s3_bucket=repr(s3_bucket),
+        index_id=repr(index_id),
+        temp_dir = repr(temp_dir),
+        max_chunk_size_mb = repr(max_chunk_size_mb)
     )
     final = static_script_part + '\n' + main_block
     # print(final)
