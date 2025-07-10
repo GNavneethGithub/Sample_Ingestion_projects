@@ -155,52 +155,46 @@ def is_valid_header_line(line):
     return True
 
 
-def count_json_records(    farm_list,    file_path_template,    temp_output_dir="/tmp",    timezone="UTC" ):
+def count_records_only( farm_list,    file_path_template,     timezone="UTC" ):
     """
-    Parse multiple farms to NDJSON and return record count + file path.
+    Parse multiple farms and return total record count WITHOUT creating any files.
     
     Parameters:
     - farm_list: List of farm names
     - file_path_template: Path template with {farm} placeholder
-    - temp_output_dir: Directory to save output file
-    - timezone: Timezone for timestamps (always converts to UTC/Zulu)
+    - timezone: Timezone for timestamps (not used since no file created)
     
     Returns:
-    - tuple: (record_count, file_path) or (None, None) if failed
+    - int: Total record count, or None if error occurred
     """
     
-    # Call the parsing function
-    output_path = parse_multiple_farms_to_ndjson(
-        farm_list=farm_list,
-        file_path_template=file_path_template,
-        temp_output_dir=temp_output_dir,
-        timezone=timezone
-    )
+    total_records = 0
     
-    # If parsing failed, return None values
-    if not output_path:
-        print("[INFO] No output file created - parsing failed or no data found")
-        return None, None
-    
-    # Count records in the NDJSON file
+    # Generate timestamp (even though we won't use it for file creation)
     try:
-        with open(output_path, "r") as f:
-            record_count = sum(1 for line in f if line.strip())
+        current_dt = datetime.now(pytz.UTC)
+        current_timestamp = current_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except:
+        current_timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    for farm in farm_list:
+        file_path = file_path_template.replace("{farm}", farm)
         
-        print(f"[INFO] Record count: {record_count}")
-        print(f"[INFO] File location: {output_path}")
+        if not os.path.isfile(file_path):
+            print(f"[INFO] Farm {farm}: File not available")
+            continue
         
-        return record_count, output_path
+        farm_records = parse_single_farm_data(file_path, farm, current_timestamp)
         
-    except Exception as e:
-        print(f"[ERROR] Failed to count records in file {output_path}: {e}")
-        return None, None
-
-
-
-
-
-
+        if farm_records:
+            farm_count = len(farm_records)
+            total_records += farm_count
+            print(f"[INFO] Farm {farm}: {farm_count} records")
+        else:
+            print(f"[INFO] Farm {farm}: No data found")
+    
+    print(f"[INFO] Total records across all farms: {total_records}")
+    return total_records
 
 
 
