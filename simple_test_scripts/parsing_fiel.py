@@ -5,12 +5,7 @@ from datetime import datetime
 import pytz
 
 
-def parse_multiple_farms_to_ndjson(
-    farm_list,
-    file_path_template,
-    temp_output_dir="/tmp",
-    timezone="UTC"
-):
+def parse_multiple_farms_to_ndjson(    farm_list,    file_path_template,    temp_output_dir="/tmp",    timezone="UTC" ):
     """
     Parse multiple farms and save all data to single .json file in NDJSON format.
     Always uses Zulu time format regardless of input timezone.
@@ -159,223 +154,53 @@ def is_valid_header_line(line):
     
     return True
 
-# # Usage:
-# farms = ["farm1", "farm2", "farm3", "farm4"]
-# template = "/data/{farm}/config/lsb.users"
 
-# output_path = parse_multiple_farms_to_ndjson(
-#     farm_list=farms,
-#     file_path_template=template,
-#     temp_output_dir="/tmp"
-# )
-
-# if output_path:
-#     print(f"Success: {output_path}")
-# else:
-#     print("No output file created")
-
-
-
-
-import os
-import json
-
-def create_test_environment():
+def count_json_records(    farm_list,    file_path_template,    temp_output_dir="/tmp",    timezone="UTC" ):
     """
-    Create sample lsb.users files matching production structure:
-    /global/lsf/cells/{farm}/conf/lsbatch/{farm}/configdir/lsb.users
+    Parse multiple farms to NDJSON and return record count + file path.
+    
+    Parameters:
+    - farm_list: List of farm names
+    - file_path_template: Path template with {farm} placeholder
+    - temp_output_dir: Directory to save output file
+    - timezone: Timezone for timestamps (always converts to UTC/Zulu)
+    
+    Returns:
+    - tuple: (record_count, file_path) or (None, None) if failed
     """
     
-    # Farm list from your config
-    farms = ["amscae_lsf_grid", "pythia", "us01_swe", "us01_vcprod", 
-             "us01_vcstrain", "us01_vctrain", "edag_batch1", 
-             "edag_batch2", "edag_int", "edag_perf", "edag_shared"]
-    
-    # Base directory for testing
-    base_dir = "/tmp/test_lsf"
-    
-    # Template path
-    template = "/global/lsf/cells/{farm}/conf/lsbatch/{farm}/configdir/lsb.users"
-    
-    print("Creating test environment...")
-    
-    # Sample UserGroup configurations
-    sample_configs = {
-        "amscae_lsf_grid": """# Sample lsb.users for amscae_lsf_grid
-Begin UserGroup
-GROUP_NAME       GROUP_MEMBER                                                  USER_SHARES                             #GROUP_ADMIN
-cme_users        (kmli mpiyush anmolm subdas skwon majoshi mvp)                ([user5, 16] [user6, 34] [user7, 15])   #()
-admin_users      (lsfadmin ikeoka)                                             ([default, 10])                        #()
-batch_users      (admin_users di_users cme_users pov_users)                   ()                                      #()
-End UserGroup""",
-        
-        "pythia": """# Sample lsb.users for pythia
-Begin UserGroup
-GROUP_NAME       GROUP_MEMBER                                                  USER_SHARES
-ais_users        (zhengxu xihui giuliog trust cathal esen chanvan)             ([cpuff, 200] [zhengxu, 14] [xihui, 14] [trust, 14])
-ml_users         (researcher1 researcher2 datascientist1)                      ([researcher1, 50] [default, 25])
-End UserGroup""",
-        
-        "us01_swe": """# Sample lsb.users for us01_swe
-Begin UserGroup  
-GROUP_NAME       GROUP_MEMBER                     USER_SHARES                    #GROUP_ADMIN
-dev_users        (developer1 developer2 tester1)  ([developer1, 40] [tester1, 20])  #()
-qa_users         (qa_lead qa_analyst)             ([qa_lead, 30] [default, 10])      #()
-End UserGroup""",
-        
-        "us01_vcprod": """# Sample lsb.users for us01_vcprod
-Begin UserGroup
-GROUP_NAME       GROUP_MEMBER                     USER_SHARES
-prod_users       (produser1 produser2 sysadmin)   ([produser1, 100] [sysadmin, 50])
-End UserGroup""",
-        
-        "edag_batch1": """# Sample lsb.users for edag_batch1 - NO UserGroup block
-Begin User
-USER_NAME     MAX_PEND_JOBS     MAX_JOBS
-user1         800               1000
-default       1000              1000
-End User""",
-        
-        "edag_int": """# Sample lsb.users for edag_int - Empty UserGroup
-Begin UserGroup
-GROUP_NAME       GROUP_MEMBER     USER_SHARES
-End UserGroup"""
-    }
-    
-    # Create test files
-    created_files = []
-    
-    for farm in farms:
-        # Generate file path
-        file_path = template.replace("{farm}", farm)
-        # Replace /global with /tmp/test_lsf for testing
-        test_file_path = file_path.replace("/global", base_dir)
-        
-        # Create directory structure
-        os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
-        
-        # Create file content
-        if farm in sample_configs:
-            content = sample_configs[farm]
-        elif farm in ["us01_vcstrain", "us01_vctrain"]:
-            # These farms will have missing files (test case)
-            print(f"Skipping {farm} - testing missing file scenario")
-            continue
-        else:
-            # Default content for remaining farms
-            content = f"""# Sample lsb.users for {farm}
-Begin UserGroup
-GROUP_NAME       GROUP_MEMBER          USER_SHARES
-default_users    (user1 user2 user3)   ([user1, 25] [user2, 25] [default, 50])
-End UserGroup"""
-        
-        # Write file
-        with open(test_file_path, "w") as f:
-            f.write(content)
-        
-        created_files.append(test_file_path)
-        print(f"Created: {test_file_path}")
-    
-    return base_dir, template.replace("/global", base_dir), farms
-
-def test_parsing_function():
-    """Test the parsing function with sample data."""
-    
-    # Create test environment
-    base_dir, test_template, farms = create_test_environment()
-    
-    print(f"\n{'='*80}")
-    print("TESTING PARSING FUNCTION")
-    print(f"{'='*80}")
-    
-    # Test the parsing function
+    # Call the parsing function
     output_path = parse_multiple_farms_to_ndjson(
-        farm_list=farms,
-        file_path_template=test_template,
-        temp_output_dir="/tmp",
-        timezone="UTC"
+        farm_list=farm_list,
+        file_path_template=file_path_template,
+        temp_output_dir=temp_output_dir,
+        timezone=timezone
     )
     
-    if output_path:
-        print(f"\n{'='*80}")
-        print("PARSING RESULTS")
-        print(f"{'='*80}")
-        print(f"Output file: {output_path}")
-        
-        # Show sample of created NDJSON file
-        print(f"\nSample content (first 5 lines):")
+    # If parsing failed, return None values
+    if not output_path:
+        print("[INFO] No output file created - parsing failed or no data found")
+        return None, None
+    
+    # Count records in the NDJSON file
+    try:
         with open(output_path, "r") as f:
-            for i, line in enumerate(f):
-                if i >= 5:
-                    break
-                record = json.loads(line.strip())
-                print(f"Line {i+1}: farm={record['farm']}, group={record['group']}, user={record['user_name']}, fairshare={record['fairshare']}")
+            record_count = sum(1 for line in f if line.strip())
         
-        # Count total records
-        with open(output_path, "r") as f:
-            total_lines = sum(1 for line in f)
-        print(f"\nTotal records in file: {total_lines}")
+        print(f"[INFO] Record count: {record_count}")
+        print(f"[INFO] File location: {output_path}")
         
-    else:
-        print("No output file created - check for errors above")
-    
-    # Cleanup
-    print(f"\n{'='*80}")
-    print("CLEANUP")
-    print(f"{'='*80}")
-    import shutil
-    if os.path.exists(base_dir):
-        shutil.rmtree(base_dir)
-        print(f"Cleaned up test directory: {base_dir}")
-
-
-
-def test_parsing_function_keep_file():
-    """Test the parsing function and keep the output file."""
-    
-    # Create test environment
-    base_dir, test_template, farms = create_test_environment()
-    
-    print(f"\n{'='*80}")
-    print("TESTING PARSING FUNCTION")
-    print(f"{'='*80}")
-    
-    # Test the parsing function
-    output_path = parse_multiple_farms_to_ndjson(
-        farm_list=farms,
-        file_path_template=test_template,
-        temp_output_dir="/tmp",
-        timezone="UTC"
-    )
-    
-    if output_path:
-        print(f"\n{'='*80}")
-        print("PARSING RESULTS")
-        print(f"{'='*80}")
-        print(f"Output file: {output_path}")
+        return record_count, output_path
         
-        # Show actual file contents
-        print(f"\nFull file contents:")
-        with open(output_path, "r") as f:
-            for i, line in enumerate(f, 1):
-                print(f"Line {i}: {line.strip()}")
-        
-        print(f"\n*** FILE PRESERVED AT: {output_path} ***")
-        
-    # Clean up test directories but KEEP the output file
-    import shutil
-    if os.path.exists(base_dir):
-        shutil.rmtree(base_dir)
-        print(f"Cleaned up test directory: {base_dir}")
-        print(f"Output file still available at: {output_path}")
+    except Exception as e:
+        print(f"[ERROR] Failed to count records in file {output_path}: {e}")
+        return None, None
 
 
 
 
 
-# Run the test
-if __name__ == "__main__":
-    # Make sure we have the parsing function available
-    # (Include the parse_multiple_farms_to_ndjson function we created earlier)
-    
-    test_parsing_function_keep_file()
+
+
+
+
