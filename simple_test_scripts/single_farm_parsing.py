@@ -39,7 +39,8 @@ def parse_single_farm_data(file_path, farm_name, timestamp_str):
 
                     # Clean and extract parts
                     cleaned = stripped_line.split("#")[0].strip()
-                    match = re.match(r'^(\S+)\s+\(([^)]*)\)\s+\(([^)]*)\)', cleaned)
+                    match = re.match(r'^(\S+)\s*\(\s*([^)]+?)\s*\)\s*\(\s*([^)]+?)\s*\)', cleaned)
+
 
                     if not match:
                         print(f"[WARN] Could not parse line: {stripped_line}")
